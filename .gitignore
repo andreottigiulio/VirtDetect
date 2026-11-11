@@ -1,0 +1,22 @@
+# Toolchain portatile e cache (ricostruibili)
+/.tools/
+/.cache/
+
+# Build
+/dist/
+/obj/
+*.exe
+*.obj
+*.res
+*.pdb
+*.ilk
+*.map
+
+# Report di prova generati a mano
+/report.txt
+
+# Editor
+.vs/
+.vscode/
+*.user
+*.suo

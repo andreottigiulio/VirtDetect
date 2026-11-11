@@ -1,0 +1,4 @@
+# Testo normalizzato a LF nel repository; gli script Windows restano CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
