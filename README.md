@@ -1,9 +1,11 @@
 # VirtDetect
 
 Piccolo programma console in **C** per Windows x64 che raccoglie, con tutte le
-tecniche note e senza privilegi di amministratore, le prove che la macchina sia
-fisica oppure virtuale (VMware, VirtualBox, QEMU/KVM, Hyper-V, Xen, Parallels,
-Bochs, bhyve, cloud/VPS).
+tecniche note, le prove che la macchina sia fisica oppure virtuale (VMware,
+VirtualBox, QEMU/KVM, Hyper-V, Xen, Parallels, Bochs, bhyve, cloud/VPS).
+L'uso normale non richiede privilegi di amministratore; se l'eseguibile viene
+avviato come amministratore esegue in piu' il blocco **ATA IDENTIFY** sui
+dischi ATA/SATA (vedi [Controlli privilegiati](#controlli-privilegiati-opzionali)).
 
 Alla fine mostra ogni controllo con il suo peso e un verdetto complessivo.
 Ogni voce del report riporta **il metodo usato** e **l'esito ottenuto**; i
@@ -28,6 +30,7 @@ installare nulla nel sistema e senza toccare il PATH.
 | Dispositivi | modello e **formato del seriale** dei dischi fisici via `IOCTL_STORAGE_QUERY_PROPERTY`, descrizione/MAC delle schede di rete, adattatore video virtuale, batteria |
 | Timing | costo di `CPUID` (exit dell'hypervisor), `SIDT` "red pill", **throughput di una catena dipendente** (nativo ~1 ciclo, emulazione 10-50), confronto frequenza TSC/QPC |
 | Coerenza | CPUID.1 family/model/stepping contro il nome commerciale, core/thread contro brand + topologia + SMBIOS, **device e subsystem ID PCI** contro la piattaforma, memoria SMBIOS contro la RAM di Windows, inventario SMBIOS, clamp delle foglie CPUID |
+| Privilegi (opzionale) | **ATA IDENTIFY DEVICE** dei dischi ATA/SATA (modello, seriale, firmware, rotazione, NCQ, TRIM), coerenza tra livello ATA e descrizione Windows, SSD/NVMe dichiarati contro i dati reali; si attiva solo se il programma e' avviato come amministratore |
 | Processi | processi dei guest tools e DLL guest caricate nel processo |
 
 Alcune prove sono **dirette** (firma hypervisor, backdoor VMware, parametri
@@ -43,13 +46,15 @@ verificabile a mano.
 - Solo per la **build**: PowerShell 5.1 (incluso in Windows) e connessione a
   internet al primo avvio. `curl.exe` e `tar.exe` di sistema vengono usati se
   presenti, altrimenti lo script usa i fallback nativi di PowerShell.
-- Nessun privilegio di amministratore, nessuna installazione, nessuna modifica
-  permanente al PATH.
+- Nessun privilegio di amministratore per l'uso normale, nessuna installazione,
+  nessuna modifica permanente al PATH. Il blocco ATA opzionale richiede di
+  avviare l'exe come amministratore; il programma non chiede l'elevazione da
+  solo.
 
 Al primo setup lo script scarica circa **264 MB** (winlibs GCC 16.2.0
 posix-seh, UCRT, x64) e occupa circa **950 MB** in `.tools\` piu' 264 MB in
 `.cache\`. Le build successive sono offline. L'eseguibile finale pesa circa
-92 KB e non richiede DLL MinGW.
+100 KB e non richiede DLL MinGW.
 
 ## Build
 
@@ -159,7 +164,8 @@ quello che ha trovato. Il modello e' documentato in
 3. **+0.20 per ogni punto di peso** dei controlli positivi (firma CPUID 40 →
    +8.0; disco virtuale 25 → +5.0; NIC 10 → +2.0);
 4. **+0.40 per ogni categoria indipendente** coinvolta oltre la prima
-   (CPUID, firmware, registro, dispositivi, timing, coerenza, processi);
+   (CPUID, firmware, registro, dispositivi, timing, coerenza, processi,
+   privilegi ATA);
 5. **+0.25 per ogni punto di peso** delle incoerenze (canale separato, non
    sommato al punteggio): un subsystem PCI virtuale da 35 punti vale +8.75;
 6. una **prova diretta** (firma hypervisor reale, backdoor VMware, parametri
@@ -215,6 +221,38 @@ Un controllo che non puo' essere eseguito (fonte non leggibile) viene
 mostrato come `[--]`, non come `[ok]`: il report distingue "nessuna traccia"
 da "non ho potuto guardare".
 
+## Controlli privilegiati (opzionali)
+
+Se VirtDetect viene avviato **come amministratore**, Windows concede
+l'apertura in lettura/scrittura di `\\.\PhysicalDriveN` e il programma invia
+anche il comando **ATA IDENTIFY DEVICE** (`0xEC`) ai dischi ATA/SATA. Senza
+elevazione il blocco produce una sola riga `[--]` con il motivo e il resto
+del report non cambia.
+
+| Regola | Confronto | Peso |
+|--------|-----------|------|
+| Disco virtuale a livello ATA | modello, seriale o firmware restituiti da IDENTIFY contengono un marchio di virtualizzazione | 25 |
+| Livelli disco incoerenti | solo uno tra descrizione Windows e IDENTIFY dichiara un disco virtuale | 30 (incoerenza) |
+| SSD dichiarato ma disco rotante | il nome del disco contiene "SSD" ma la word 217 riporta almeno 1000 RPM | 20 (incoerenza) |
+| NVMe su bus non NVMe | il modello contiene "NVMe" ma il bus e' ATA/SATA/SCSI/RAID | 20 (incoerenza) |
+
+IDENTIFY fornisce anche modello, seriale, firmware, rotazione, NCQ e TRIM,
+mostrati come dati `[i]`. I dischi USB sono esclusi dalla regola NVMe per non
+segnalare box esterni che riportano il nome dell'unita' interna.
+
+Il comando si esegue da un terminale gia' aperto come amministratore:
+
+```bat
+dist\VirtDetect.exe --verbose
+```
+
+Limiti dichiarati: NVMe, RAID hardware, USB e dischi VHD non supportano ATA
+IDENTIFY e compaiono in una riga `[--]` con il bus, non come `[ok]`. Il
+confronto e' tra due livelli del disco emulato: un hypervisor che falsifica
+anche IDENTIFY (modello, seriale e rotazione credibili) non viene
+smascherato da questo blocco. MSR, spazio di configurazione PCI e memoria
+EBDA richiederebbero un driver kernel, non solo l'elevazione.
+
 ## Come leggere il risultato
 
 - **Bit hypervisor + firma CPUID**: e' la prova piu' diretta, ma il solo bit
@@ -248,6 +286,10 @@ da "non ho potuto guardare".
   kernel), `\\\\.\\PhysicalDriveN` non apribile da utente standard (il limite
   viene dichiarato). Un "[ok]" con dati mancanti non deve essere letto come
   prova di PC fisico.
+- **Privilegi**: da utente normale il blocco ATA e' `[--]`; avviato come
+  amministratore confronta il livello ATA con la descrizione Windows. Un
+  modello virtuale letto da IDENTIFY pesa 25, mentre un SSD o NVMe dichiarato
+  contro dati reali diversi produce un'incoerenza da 20-30.
 - **Probabilita'**: e' l'indice che decide il verdetto (vedi la sezione
   precedente). Pesa i controlli positivi, le incoerenze, la varieta' delle
   categorie coinvolte e il bit hypervisor; una prova diretta la porta al 99%
@@ -278,6 +320,7 @@ commento e l'output restano allineati.
 | `src/timing_checks.c` | costo CPUID, SIDT "red pill", catena dipendente, TSC vs QPC |
 | `src/coherence.c` | family/model/stepping vs brand, core/thread, PCI device/subsystem, memoria SMBIOS, inventario, clamp CPUID |
 | `src/process_checks.c` | processi guest, DLL caricate |
+| `src/privileged_checks.c` | elevazione del token, ATA IDENTIFY, coerenza livelli disco, SSD/NVMe contro dati reali |
 | `src/vendor.c` | tabella delle parole chiave che identificano i vendor |
 
 Oltre ai metodi, ogni modulo documenta nel commento iniziale i **falsi
@@ -304,6 +347,7 @@ hardware non in tabella, UMIP attivo, ecc.).
 │   ├── timing_checks.c
 │   ├── coherence.c           # combinazioni impossibili (CPU, PCI, SMBIOS)
 │   ├── process_checks.c
+│   ├── privileged_checks.c   # ATA IDENTIFY (solo amministratore)
 │   ├── probability.c         # probabilita' euristica (logit)
 │   └── main.c
 ├── res/VirtDetect.rc         # VERSIONINFO
@@ -339,16 +383,22 @@ Dopo `clean.cmd -Tools`, il successivo `build.cmd` riscarica la toolchain.
 - Build Release e Debug verificate con GCC 16.2.0 della toolchain inclusa.
 - Host di prova: Windows 11 build 26200 su ASRock X99, i7-5820K (6C/12T),
   BIOS AMI legacy, 4 moduli da 4 GB, dischi SATA reali. Risultato con
-  `--verbose`: **49 controlli, 0 positivi, 0 incoerenze, 1%, "PC FISICO",
-  codice 0** (senza `--verbose` i controlli solo diagnostici non vengono
-  elencati: 36).
+  `--verbose`: **50 controlli, 0 positivi, 0 incoerenze, 1%, "PC FISICO",
+  codice 0** (senza `--verbose`: 37). La sessione di prova non era elevata,
+  quindi il blocco ATA compare come `[--]` con il motivo.
   Le regole di coerenza sono state calibrate su questo host (family 6 vs
   brand Core, 6C/12T concordi su CPUID/Windows/SMBIOS, 78 device PCI con PCH
   moderno e nessun subsystem virtuale, 32 strutture SMBIOS complete, clamp
   CPUID corretto, nessun seriale disco in formato bus) e non scattano.
 - Falsi positivi gia' corretti in sessioni precedenti: servizi e driver di
   VMware Workstation, VirtualBox e Hyper-V **installati sull'host** vengono
-  riconosciuti come tali e non conteggiati come guest tools.
+  riconosciuti come tali e non conteggiati come guest tools. Nel blocco ATA
+  i dischi USB sono esclusi dalla regola NVMe e la ricerca del vendor non usa
+  il seriale, per non confondere una stringa casuale con un marchio.
+- Il parser ATA IDENTIFY e' stato provato con settori sintetici (SSD con
+  rotazione 1, HDD a 7200 RPM, risposta ATAPI e modello vuoto): tutti i casi
+  superati. Il percorso elevato con un disco reale non e' stato eseguito in
+  questa sessione: avvia l'exe come amministratore per verificarlo.
 - Le regole di coerenza sono state provate anche con un harness offline che
   costruisce profili sintetici: family 15 + brand i7-5820K -> incoerenza 30;
   4C/4T + brand 6C/12T -> incoerenza 30; inventario SMBIOS da 10 strutture

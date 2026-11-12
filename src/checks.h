@@ -40,5 +40,20 @@ void checks_devices(VdReport *r);
 void checks_timing(VdReport *r);
 void checks_processes(VdReport *r);
 void checks_coherence(VdReport *r);
+void checks_privileged(VdReport *r);
+
+/* Risposta ATA IDENTIFY DEVICE decodificata. Il parser e' separato dalla
+   chiamata IOCTL per poterlo provare con un settore sintetico. */
+typedef struct {
+    char model[48];
+    char serial[32];
+    char firmware[16];
+    int rotation;   /* 0 = non riportata, 1 = SSD, >= 1000 = RPM */
+    int ncq;
+    int trim;
+    int valid;
+} VdAtaIdentify;
+
+void vd_ata_parse_identify(const unsigned char *sector, VdAtaIdentify *out);
 
 #endif

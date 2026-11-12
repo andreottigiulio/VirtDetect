@@ -24,10 +24,10 @@
       evita che tanti indizi debolissimi saturino la percentuale.
 
    4) "Ampiezza delle prove": ogni categoria indipendente (CPUID, firmware,
-      registro, dispositivi, timing, processi) che contiene almeno un
-      positivo aggiunge +0.4 oltre la prima. Cinque categorie diverse che
-      concordano valgono piu' di cinque controlli tutti nello stesso
-      modulo: hypervisor, firmware, dischi e driver non possono essere
+      registro, dispositivi, timing, processi, privilegi ATA) che contiene
+      almeno un positivo aggiunge +0.4 oltre la prima. Cinque categorie
+      diverse che concordano valgono piu' di cinque controlli tutti nello
+      stesso modulo: hypervisor, firmware, dischi e driver non possono essere
       falsificati tutti insieme per caso.
 
    5) Se una prova e' "definitiva" (firma hypervisor reale, backdoor VMware,

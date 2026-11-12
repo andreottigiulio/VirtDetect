@@ -337,6 +337,7 @@ int main(int argc, char **argv)
     checks_timing(&report);
     checks_processes(&report);
     checks_coherence(&report);
+    checks_privileged(&report);
 
     const char *category = NULL;
     for (int i = 0; i < report.count; ++i) {
