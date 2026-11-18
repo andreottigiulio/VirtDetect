@@ -20,6 +20,12 @@
       Stessa idea, ma sul disco: cercano i driver esclusivi dei guest
       (vboxguest.sys, vmmouse.sys, virtio*.sys...). Peso basso (8).
 
+   B-bis) Pacchetti .inf in System32\DriverStore\FileRepository.
+      Il DriverStore conserva il pacchetto anche quando il dispositivo non
+      e' collegato: qemutablet.inf, vboxguest.inf, viostor.inf restano li'
+      come traccia. Sono esclusi i pacchetti host di VirtualBox (vboxusb,
+      vboxnet*, vboxsup) e VMware (vmci, vmnet*, vmx86). Peso 8.
+
    C) Chiavi di installazione dei guest tools.
       VMware Tools (HKLM\SOFTWARE\VMware, Inc.\VMware Tools), VirtualBox
       Guest Additions e, per Hyper-V, la chiave Guest\Parameters che esiste
@@ -73,6 +79,11 @@ static const char *const M_HYPERV_STACK =
 static const char *const M_DRIVERS =
     "Elenca System32\\drivers e cerca i file .sys esclusivi dei guest tools "
     "(vboxguest, vmmouse, virtio...).";
+static const char *const M_DRIVERSTORE =
+    "Elenca System32\\DriverStore\\FileRepository: i pacchetti .inf dei guest "
+    "tools (qemutablet.inf, vboxguest.inf, viostor.inf) restano anche senza "
+    "dispositivo collegato. I pacchetti host di VirtualBox e VMware sono "
+    "esclusi.";
 static const char *const M_GUEST_KEYS =
     "Verifica le chiavi di installazione: VMware Tools, VirtualBox Guest "
     "Additions, parametri guest Hyper-V.";
@@ -191,7 +202,8 @@ static const char *const vbox_guest_services[] = {
     "vboxwddm", "vboxtray", NULL
 };
 static const char *const qemu_guest_services[] = {
-    "qemu-ga", "virtio", "viostor", "vioscsi", "netkvm", "balloon", "vioser", NULL
+    "qemu-ga", "qemutablet", "qemukbd", "qemumouse", "virtio", "viostor",
+    "vioscsi", "netkvm", "balloon", "vioser", NULL
 };
 
 static void service_cb(const wchar_t *name, void *user)
@@ -341,6 +353,91 @@ static void check_driver_files(VdReport *r)
     } else {
         vd_add(r, CAT, "Driver guest su disco", M_DRIVERS, VDS_CLEAN, 0,
                "nessun driver guest riconoscibile in System32\\drivers");
+    }
+}
+
+/* ------------------------------------------------ pacchetti nel DriverStore */
+
+/* Nomi esclusivi dei guest. Attenzione: "vboxusb", "vboxusbmon", "vboxnetadp6",
+   "vboxnetlwf", "vboxsup", "vmci", "vmnet*", "vmx86" sono driver HOST e non
+   devono comparire in queste liste. */
+static const char *const ds_vbox[] = {
+    "vboxguest", "vboxmouse", "vboxsf", "vboxvideo", "vboxwddm", "vboxtray", NULL
+};
+static const char *const ds_vmware[] = {
+    "vmmouse", "vmhgfs", "vmrawdsk", "vmusbmouse", "vm3dmp", "vm3dgl", NULL
+};
+static const char *const ds_qemu[] = {
+    "qemutablet", "qemukbd", "qemumouse", "qemufwcfg", "qemupciserial",
+    "qemu-ga", "virtio", "viostor", "vioscsi", "netkvm", "balloon", "vioser",
+    "viofs", "vioserial", "qxl", NULL
+};
+static const char *const ds_xen[] = { "xen", NULL };
+static const char *const ds_parallels[] = { "prl_", NULL };
+
+/* Metodo B-bis. */
+static void check_driver_store(VdReport *r)
+{
+    wchar_t pattern[MAX_PATH];
+    UINT len = GetWindowsDirectoryW(pattern, MAX_PATH);
+    if (!len || len + 56 >= MAX_PATH) {
+        vd_add(r, CAT, "Pacchetti driver nel DriverStore", M_DRIVERSTORE,
+               VDS_SKIP, 0, "cartella di Windows non determinata");
+        return;
+    }
+    wcscat(pattern, L"\\System32\\DriverStore\\FileRepository\\*");
+
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW(pattern, &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+        vd_add(r, CAT, "Pacchetti driver nel DriverStore", M_DRIVERSTORE,
+               VDS_SKIP, 0, "impossibile elencare il DriverStore");
+        return;
+    }
+
+    FileHits h;
+    memset(&h, 0, sizeof(h));
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            continue;
+        }
+        char name[260];
+        vd_utf16_to_utf8(fd.cFileName, name, sizeof(name));
+        vd_lower_ascii(name);
+
+        if (contains_any(name, ds_vbox)) {
+            add_token(h.vbox, sizeof(h.vbox), name);
+        } else if (contains_any(name, ds_vmware)) {
+            add_token(h.vmware, sizeof(h.vmware), name);
+        } else if (contains_any(name, ds_qemu)) {
+            add_token(h.qemu, sizeof(h.qemu), name);
+        } else if (contains_any(name, ds_xen)) {
+            add_token(h.xen, sizeof(h.xen), name);
+        } else if (contains_any(name, ds_parallels)) {
+            add_token(h.parallels, sizeof(h.parallels), name);
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+
+    char all[1400] = "";
+    add_group(all, sizeof(all), "VMware", h.vmware);
+    add_group(all, sizeof(all), "VirtualBox", h.vbox);
+    add_group(all, sizeof(all), "QEMU", h.qemu);
+    add_group(all, sizeof(all), "Xen", h.xen);
+    add_group(all, sizeof(all), "Parallels", h.parallels);
+
+    if (all[0]) {
+        vd_add(r, CAT, "Pacchetti driver nel DriverStore", M_DRIVERSTORE,
+               VDS_DETECTED, 8, "%s", all);
+        if (h.vmware[0]) vd_note_vendor(r, VD_VENDOR_VMWARE, 50);
+        else if (h.vbox[0]) vd_note_vendor(r, VD_VENDOR_VBOX, 50);
+        else if (h.qemu[0]) vd_note_vendor(r, VD_VENDOR_QEMU, 50);
+        else if (h.xen[0]) vd_note_vendor(r, VD_VENDOR_XEN, 50);
+        else if (h.parallels[0]) vd_note_vendor(r, VD_VENDOR_PARALLELS, 50);
+    } else {
+        vd_add(r, CAT, "Pacchetti driver nel DriverStore", M_DRIVERSTORE,
+               VDS_CLEAN, 0,
+               "nessun pacchetto .inf di guest tools nel DriverStore");
     }
 }
 
@@ -647,6 +744,7 @@ void checks_registry(VdReport *r)
 {
     check_services(r);
     check_driver_files(r);
+    check_driver_store(r);
     check_guest_keys(r);
     check_disk_enum(r);
     check_pci(r);

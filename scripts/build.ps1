@@ -207,7 +207,7 @@ function Invoke-Build([string]$MingwBin) {
     }
 
     $compileArgs = $flags + $sources + @($rcObj, '-o', $exe,
-        '-liphlpapi', '-ladvapi32', '-luser32', '-lm',
+        '-liphlpapi', '-ladvapi32', '-luser32', '-lsetupapi', '-lm',
         '-static', '-static-libgcc',
         '-Wl,--dynamicbase', '-Wl,--nxcompat')
 

@@ -26,8 +26,8 @@ installare nulla nel sistema e senza toccare il PATH.
 |------|----------|
 | CPUID | bit hypervisor `CPUID.1:ECX[31]`, firma `0x40000000` (VMware, Hyper-V, KVM, Xen, VirtualBox, TCG, Parallels, bhyve, ACRN), brand CPU virtuale, backdoor VMware sulla porta `0x5658`, larghezza indirizzi fisici |
 | Firmware | parsing della tabella **SMBIOS/DMI** (BIOS, sistema, board, chassis, UUID, moduli RAM), OEM ID delle tabelle **ACPI** (FADT + registro `HARDWARE\ACPI`), inventario tabelle con `EnumSystemFirmwareTables`, dati secondari **MSDM/thermal zone/PNP0C14**, stringhe BIOS in `HARDWARE\DESCRIPTION\System\BIOS` e `Control\SystemInformation` |
-| Registro | servizi e driver **guest tools** (VMware Tools, VirtualBox Guest Additions, QEMU GA, Xen, Parallels), identificatori in `Services\Disk\Enum`, device **PCI** con vendor ID virtuali (`15AD`, `80EE`, `1AF4`, `1B36`, `5853`, `1AB8`, `1234`), device **ACPI** (`QEMU0002`, `VBOX0001`, `VMBUS`, `AMZN...`), dischi `Enum\SCSI/IDE`, programmi installati |
-| Dispositivi | modello e **formato del seriale** dei dischi fisici via `IOCTL_STORAGE_QUERY_PROPERTY`, descrizione/MAC delle schede di rete, adattatore video virtuale, batteria |
+| Registro | servizi e driver **guest tools** (VMware Tools, VirtualBox Guest Additions, QEMU GA, Xen, Parallels), pacchetti `.inf` nel **DriverStore** (`qemutablet.inf`, `vboxguest.inf`, `viostor.inf`), identificatori in `Services\Disk\Enum`, device **PCI** con vendor ID virtuali (`15AD`, `80EE`, `1AF4`, `1B36`, `5853`, `1AB8`, `1234`), device **ACPI** (`QEMU0002`, `VBOX0001`, `VMBUS`, `AMZN...`), dischi `Enum\SCSI/IDE`, programmi installati |
+| Dispositivi | modello e **formato del seriale** dei dischi fisici via `IOCTL_STORAGE_QUERY_PROPERTY`, descrizione/MAC delle schede di rete, adattatore video virtuale, **USB/HID** presenti e installati (`VID_0627` QEMU tablet, `VID_80EE` VirtualBox, `VID_0E0F` VMware, `VID_1AB8` Parallels, `VID_5853` Xen, descrizioni "QEMU USB Tablet", "VirtualBox"), batteria |
 | Timing | costo di `CPUID` (exit dell'hypervisor), `SIDT` "red pill", **throughput di una catena dipendente** (nativo ~1 ciclo, emulazione 10-50), confronto frequenza TSC/QPC |
 | Coerenza | CPUID.1 family/model/stepping contro il nome commerciale, core/thread contro brand + topologia + SMBIOS, **device e subsystem ID PCI** contro la piattaforma, memoria SMBIOS contro la RAM di Windows, inventario SMBIOS, clamp delle foglie CPUID |
 | Privilegi (opzionale) | **ATA IDENTIFY DEVICE** dei dischi ATA/SATA (modello, seriale, firmware, rotazione, NCQ, TRIM), coerenza tra livello ATA e descrizione Windows, SSD/NVMe dichiarati contro i dati reali; si attiva solo se il programma e' avviato come amministratore |
@@ -132,7 +132,7 @@ Esempio di verdetto con prova diretta:
 
 ```
 Probabilita' VM (euristica): 99% [molto alta]
-  basata su 4 controlli positivi in 3/7 categorie, bit hypervisor presente,
+  basata su 4 controlli positivi in 3/8 categorie, bit hypervisor presente,
   prova diretta presente
 VERDETTO: VM RILEVATA (firma hypervisor diretta)
 Vendor probabile: VMware
@@ -143,7 +143,7 @@ Esempio con sole incoerenze (VM senza firme note):
 ```
 Incoerenze: 2 combinazioni impossibili (peso 65, non sommate al punteggio)
 Probabilita' VM (euristica): 99% [molto alta]
-  basata su 0 controlli positivi in 0/7 categorie, combinazioni impossibili
+  basata su 0 controlli positivi in 0/8 categorie, combinazioni impossibili
   piu' 2 incoerenze (peso 65, contributo separato)
 VERDETTO: VM RILEVATA (combinazioni impossibili per un PC fisico)
 ```
@@ -264,7 +264,18 @@ EBDA richiederebbero un driver kernel, non solo l'elevazione.
   (`vmci`, `vmnet`, `pvscsi`, `VBoxNetAdp`, `VBoxUSB`, `vmbus`, `vmic`...).
   Questi non vengono conteggiati: contano solo i componenti esclusivi dei
   guest tools (`VBoxGuest`, `VBoxSF`, `vmmouse`, `vmhgfs`, `vmtools`,
-  `qemu-ga`, driver Xen/Parallels, ecc.).
+  `qemu-ga`, driver Xen/Parallels, ecc.). Lo stesso filtro vale per il
+  **DriverStore** (`vboxusb.inf`, `vboxnet*.inf`, `vboxsup.inf` restano sul
+  PC fisico che ha VirtualBox) e per i device USB/HID (`VID_80EE&PID_CAFE` e'
+  il driver USB dell'host VirtualBox).
+- **USB/HID**: vengono elencati sia i device **presenti** sia quelli solo
+  **installati** (fantasma). Un device virtuale presente pesa 25; una voce
+  solo installata e' mostrata come `[i]` informativa e non aggiunge punti,
+  cosi' una periferica rimossa non falsa il verdetto. Se ripulisci i ghost
+  non compaiono piu' nel report.
+- **DriverStore**: un pacchetto `.inf` di guest tools rimane anche dopo la
+  disinstallazione. VirtDetect lo segnala con peso 8: e' una traccia reale,
+  ma da sola non dimostra che la VM sia quella in cui stai girando.
 - **MAC OUI**: gli adattatori host-only/host virtual switch vengono esclusi
   per evitare falsi positivi; il controllo pesa poco perche' il MAC e'
   modificabile.
@@ -315,8 +326,8 @@ commento e l'output restano allineati.
 |------|--------------------|
 | `src/cpuid_checks.c` | bit hypervisor, foglia `0x40000000`, brand CPU, backdoor VMware |
 | `src/firmware_checks.c` | SMBIOS (identita', BIOS, UUID, RAM, chassis), inventario ACPI, FADT ACPI, registro ACPI/BIOS, SystemInformation |
-| `src/registry_checks.c` | servizi, driver su disco, chiavi guest tools, `Disk\Enum`, PCI, ACPI, SCSI/IDE, programmi installati |
-| `src/device_checks.c` | dischi via IOCTL (modello e formato del seriale), NIC/MAC OUI, GPU, batteria |
+| `src/registry_checks.c` | servizi, driver su disco, pacchetti nel DriverStore, chiavi guest tools, `Disk\Enum`, PCI, ACPI, SCSI/IDE, programmi installati |
+| `src/device_checks.c` | dischi via IOCTL (modello e formato del seriale), NIC/MAC OUI, GPU, USB/HID presenti e installati, batteria |
 | `src/timing_checks.c` | costo CPUID, SIDT "red pill", catena dipendente, TSC vs QPC |
 | `src/coherence.c` | family/model/stepping vs brand, core/thread, PCI device/subsystem, memoria SMBIOS, inventario, clamp CPUID |
 | `src/process_checks.c` | processi guest, DLL caricate |
@@ -342,8 +353,8 @@ hardware non in tabella, UMIP attivo, ecc.).
 │   ├── vendor.c              # riconoscimento marchi di virtualizzazione
 │   ├── cpuid_checks.c
 │   ├── firmware_checks.c     # SMBIOS, ACPI, BIOS
-│   ├── registry_checks.c     # servizi, driver, PCI/ACPI, dischi
-│   ├── device_checks.c       # dischi, NIC/MAC, GPU
+│   ├── registry_checks.c     # servizi, driver, DriverStore, PCI/ACPI, dischi
+│   ├── device_checks.c       # dischi, NIC/MAC, GPU, USB/HID
 │   ├── timing_checks.c
 │   ├── coherence.c           # combinazioni impossibili (CPU, PCI, SMBIOS)
 │   ├── process_checks.c
@@ -383,18 +394,31 @@ Dopo `clean.cmd -Tools`, il successivo `build.cmd` riscarica la toolchain.
 - Build Release e Debug verificate con GCC 16.2.0 della toolchain inclusa.
 - Host di prova: Windows 11 build 26200 su ASRock X99, i7-5820K (6C/12T),
   BIOS AMI legacy, 4 moduli da 4 GB, dischi SATA reali. Risultato con
-  `--verbose`: **50 controlli, 0 positivi, 0 incoerenze, 1%, "PC FISICO",
-  codice 0** (senza `--verbose`: 37). La sessione di prova non era elevata,
-  quindi il blocco ATA compare come `[--]` con il motivo.
+  `--verbose`: **53 controlli, 0 incoerenze** (senza `--verbose`: 37). La
+  sessione di prova non era elevata, quindi il blocco ATA compare come
+  `[--]` con il motivo. In una sessione successiva, con **Hyper-V/VBS
+  attivo**, lo stesso host ha mostrato 2 positivi (firma CPUID Microsoft Hv
+  e costo CPUID anomalo) e 33%, "POSSIBILE VM": e' il comportamento atteso
+  di un PC fisico con hypervisor di Windows attivo, non un errore del
+  rilevamento. Per un confronto pulito disattiva Hyper-V/VBS o leggi le
+  singole voci.
   Le regole di coerenza sono state calibrate su questo host (family 6 vs
   brand Core, 6C/12T concordi su CPUID/Windows/SMBIOS, 78 device PCI con PCH
   moderno e nessun subsystem virtuale, 32 strutture SMBIOS complete, clamp
   CPUID corretto, nessun seriale disco in formato bus) e non scattano.
 - Falsi positivi gia' corretti in sessioni precedenti: servizi e driver di
   VMware Workstation, VirtualBox e Hyper-V **installati sull'host** vengono
-  riconosciuti come tali e non conteggiati come guest tools. Nel blocco ATA
-  i dischi USB sono esclusi dalla regola NVMe e la ricerca del vendor non usa
-  il seriale, per non confondere una stringa casuale con un marchio.
+  riconosciuti come tali e non conteggiati come guest tools. Lo stesso vale
+  per i pacchetti host nel DriverStore (`vboxusb`, `vboxnet*`, `vboxsup`,
+  `vmci`, `vmnet*`, `vmx86`) e per il driver USB dell'host VirtualBox
+  (`VID_80EE&PID_CAFE`). Nel blocco ATA i dischi USB sono esclusi dalla
+  regola NVMe e la ricerca del vendor non usa il seriale, per non confondere
+  una stringa casuale con un marchio.
+- USB/HID e DriverStore sono stati provati sull'host fisico (che ha
+  VirtualBox installato): entrambi riportano `[ok]`, quindi il filtro host
+  funziona. Il percorso "device virtuale presente" (QEMU tablet) e il
+  percorso elevato con un disco reale **non sono stati eseguiti** in questa
+  sessione: provali nella VM e con l'exe avviato come amministratore.
 - Il parser ATA IDENTIFY e' stato provato con settori sintetici (SSD con
   rotazione 1, HDD a 7200 RPM, risposta ATAPI e modello vuoto): tutti i casi
   superati. Il percorso elevato con un disco reale non e' stato eseguito in
@@ -412,6 +436,14 @@ Dopo `clean.cmd -Tools`, il successivo `build.cmd` riscarica la toolchain.
   verificato a livello di logica, pesi e probabilita', ma **non e' stato
   eseguito dentro una VM reale** in questa sessione: provalo sul tuo
   hypervisor e confronta le singole voci.
+
+## Novita'
+
+- **1.1.0** - rilevamento dei dispositivi **USB/HID virtuali** (tablet QEMU,
+  periferiche VMware/VirtualBox/Parallels/Xen), pacchetti guest nel
+  **DriverStore**, servizi `qemutablet`/`qemukbd`/`qemumouse`.
+- **1.0.0** - prima release: CPUID, firmware, registro, dispositivi, timing,
+  coerenza, processi e blocco ATA opzionale.
 
 ## Licenza
 

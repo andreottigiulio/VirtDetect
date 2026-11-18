@@ -43,6 +43,7 @@
 
 #include <winsock2.h>
 #include <iphlpapi.h>
+#include <setupapi.h>
 #include <winioctl.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -69,6 +70,12 @@ static const char *const M_GPU =
 static const char *const M_POWER =
     "Legge lo stato della batteria con GetSystemPowerStatus (solo "
     "informativo).";
+static const char *const M_USB =
+    "Enumera con SetupAPI i dispositivi USB e HID presenti (DIGCF_PRESENT) e "
+    "tutte le voci installate, e cerca VID/PID dei device virtuali (0627 "
+    "QEMU, 80EE VirtualBox, 0E0F VMware, 1AB8 Parallels, 5853 Xen) e "
+    "descrizioni come 'QEMU USB Tablet'. Le voci non presenti sono mostrate "
+    "a parte, senza peso.";
 
 static void appendf(char *dst, size_t cap, const char *fmt, ...)
 {
@@ -395,6 +402,226 @@ static void check_display_adapters(VdReport *r)
     }
 }
 
+/* ----------------------------------------------------------- USB / HID */
+
+/* VID assegnati alle periferiche emulate. Un dispositivo fisico non puo'
+   avere questi identificatori: 0627 e' QEMU, 80EE VirtualBox, 0E0F VMware,
+   1AB8 Parallels, 5853 XenSource. Le descrizioni coprono il caso in cui il
+   driver generico HID non renda visibile il VID nel nome. */
+static const struct {
+    const char *pattern;
+    const char *vendor;
+} virtual_usb_patterns[] = {
+    { "VID_0627",        VD_VENDOR_QEMU },
+    { "VID_80EE",        VD_VENDOR_VBOX },
+    { "VID_0E0F",        VD_VENDOR_VMWARE },
+    { "VID_1AB8",        VD_VENDOR_PARALLELS },
+    { "VID_5853",        VD_VENDOR_XEN },
+    { "qemu",            VD_VENDOR_QEMU },
+    { "virtualbox",      VD_VENDOR_VBOX },
+    { "innotek",         VD_VENDOR_VBOX },
+    { "vmware virtual",  VD_VENDOR_VMWARE },
+    { "parallels",       VD_VENDOR_PARALLELS },
+    { "xensource",       VD_VENDOR_XEN },
+    { "xen usb",         VD_VENDOR_XEN },
+    { "virtio",          VD_VENDOR_QEMU },
+};
+
+static const char *virtual_usb_vendor(const char *text)
+{
+    for (size_t i = 0; i < sizeof(virtual_usb_patterns) /
+                            sizeof(virtual_usb_patterns[0]); ++i) {
+        if (vd_ci_contains(text, virtual_usb_patterns[i].pattern)) {
+            return virtual_usb_patterns[i].vendor;
+        }
+    }
+    return NULL;
+}
+
+static int usb_property(HDEVINFO set, SP_DEVINFO_DATA *did, DWORD prop,
+                        char *out, size_t cap)
+{
+    out[0] = '\0';
+    wchar_t w[1024];
+    DWORD type = 0;
+    DWORD size = 0;
+    if (!SetupDiGetDeviceRegistryPropertyW(set, did, prop, &type,
+                                           (PBYTE)w, sizeof(w), &size)) {
+        return 0;
+    }
+    w[(sizeof(w) / sizeof(w[0])) - 1] = L'\0';
+    return vd_utf16_to_utf8(w, out, cap);
+}
+
+static int usb_instance(HDEVINFO set, SP_DEVINFO_DATA *did,
+                        char *out, size_t cap)
+{
+    out[0] = '\0';
+    wchar_t w[512];
+    DWORD needed = 0;
+    if (!SetupDiGetDeviceInstanceIdW(set, did, w,
+                                     (DWORD)(sizeof(w) / sizeof(w[0])),
+                                     &needed)) {
+        return 0;
+    }
+    return vd_utf16_to_utf8(w, out, cap);
+}
+
+#define VD_USB_MAX_IDS 48
+
+typedef struct {
+    char present[VD_EVIDENCE_MAX];
+    char ghosts[VD_EVIDENCE_MAX];
+    int present_count;
+    int ghost_count;
+    int enumerated;
+    const char *vendor;
+    char seen_ids[VD_USB_MAX_IDS][192];
+    int seen_id_count;
+} VdUsbHits;
+
+static int usb_id_seen(const char *id, const VdUsbHits *h)
+{
+    for (int i = 0; i < h->seen_id_count; ++i) {
+        if (strcmp(h->seen_ids[i], id) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void usb_id_add(const char *id, VdUsbHits *h)
+{
+    if (h->seen_id_count < VD_USB_MAX_IDS) {
+        snprintf(h->seen_ids[h->seen_id_count],
+                 sizeof(h->seen_ids[0]), "%s", id);
+        ++h->seen_id_count;
+    }
+}
+
+/* VBoxUSB crea sul PC host una voce VID_80EE&PID_CAFE per ogni dispositivo
+   USB collegato: e' il driver host di VirtualBox, non una periferica
+   virtuale. Le VM vere usano altri PID dello stesso vendor. */
+static int is_host_usb_driver(const char *hwid, const char *desc)
+{
+    return vd_ci_contains(hwid, "PID_CAFE") ||
+           vd_ci_contains(desc, "virtualbox usb driver");
+}
+
+/* present = 1: solo dispositivi collegati; present = 0: tutte le voci
+   installate, comprese quelle non presenti (dispositivo scollegato o
+   traccia di una VM precedente). */
+static void scan_usb_enumerator(const wchar_t *enumerator, int present,
+                                VdUsbHits *h)
+{
+    DWORD flags = DIGCF_ALLCLASSES | (present ? DIGCF_PRESENT : 0);
+    HDEVINFO set = SetupDiGetClassDevsW(NULL, enumerator, NULL, flags);
+    if (set == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    h->enumerated = 1;
+
+    SP_DEVINFO_DATA did;
+    did.cbSize = sizeof(did);
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &did); ++i) {
+        char instance[224];
+        if (!usb_instance(set, &did, instance, sizeof(instance))) {
+            continue;
+        }
+        if (usb_id_seen(instance, h)) {
+            continue;
+        }
+
+        char hwid[512];
+        char desc[256];
+        char friendly[256];
+        char mfg[128];
+        usb_property(set, &did, SPDRP_HARDWAREID, hwid, sizeof(hwid));
+        usb_property(set, &did, SPDRP_DEVICEDESC, desc, sizeof(desc));
+        usb_property(set, &did, SPDRP_FRIENDLYNAME, friendly, sizeof(friendly));
+        usb_property(set, &did, SPDRP_MFG, mfg, sizeof(mfg));
+
+        char text[1200];
+        snprintf(text, sizeof(text), "%s | %s | %s | %s",
+                 hwid, desc, friendly, mfg);
+
+        if (is_host_usb_driver(hwid, desc)) {
+            continue;
+        }
+
+        const char *vendor = virtual_usb_vendor(text);
+        if (!vendor) {
+            continue;
+        }
+
+        const char *label = desc[0] ? desc : (friendly[0] ? friendly : hwid);
+        if (present) {
+            if (h->present_count < 6) {
+                appendf(h->present, sizeof(h->present), "\"%s\" [%s]; ",
+                        label, hwid[0] ? hwid : instance);
+            }
+            ++h->present_count;
+            if (!h->vendor) {
+                h->vendor = vendor;
+            }
+        } else {
+            if (h->ghost_count < 4) {
+                appendf(h->ghosts, sizeof(h->ghosts),
+                        "\"%s\" [%s]; ", label, hwid[0] ? hwid : instance);
+            }
+            ++h->ghost_count;
+        }
+        usb_id_add(instance, h);
+    }
+    SetupDiDestroyDeviceInfoList(set);
+}
+
+/* Metodo M. Il tablet QEMU e' il caso tipico: un dispositivo USB HID
+   VID_0627&PID_0001 che Windows gestisce con il driver HID generico e che
+   non compare nelle chiavi di registro gia' controllate. */
+static void check_virtual_usb_hid(VdReport *r)
+{
+    VdUsbHits h;
+    memset(&h, 0, sizeof(h));
+
+    scan_usb_enumerator(L"USB", 1, &h);
+    scan_usb_enumerator(L"HID", 1, &h);
+    scan_usb_enumerator(L"USB", 0, &h);
+    scan_usb_enumerator(L"HID", 0, &h);
+
+    if (!h.enumerated) {
+        vd_add(r, CAT, "Dispositivi USB/HID", M_USB, VDS_SKIP, 0,
+               "SetupAPI non disponibile: impossibile enumerare USB e HID");
+        return;
+    }
+
+    if (h.present_count > 6) {
+        appendf(h.present, sizeof(h.present), "e altri %d; ",
+                h.present_count - 6);
+    }
+    if (h.ghost_count > 4) {
+        appendf(h.ghosts, sizeof(h.ghosts), "e altre %d voci; ",
+                h.ghost_count - 4);
+    }
+
+    if (h.present_count) {
+        vd_add(r, CAT, "Dispositivo USB/HID virtuale", M_USB,
+               VDS_DETECTED, 25, "%s", h.present);
+        if (h.vendor) {
+            vd_note_vendor(r, h.vendor, 63);
+        }
+    }
+    if (h.ghost_count) {
+        vd_add(r, CAT, "Traccia USB/HID virtuale non presente", M_USB,
+               VDS_INFO, 0, "%s", h.ghosts);
+    }
+    if (!h.present_count && !h.ghost_count) {
+        vd_add(r, CAT, "Dispositivi USB/HID", M_USB, VDS_CLEAN, 0,
+               "nessun VID/PID o descrizione di virtualizzazione nei "
+               "dispositivi USB/HID presenti o installati");
+    }
+}
+
 /* --------------------------------------------------------- alimentazione */
 
 /* Metodo L: puramente informativo. */
@@ -420,5 +647,6 @@ void checks_devices(VdReport *r)
     check_physical_disks(r);
     check_network_adapters(r);
     check_display_adapters(r);
+    check_virtual_usb_hid(r);
     check_power(r);
 }

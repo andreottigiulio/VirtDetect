@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#define VD_VERSION "1.0.0"
+#define VD_VERSION "1.1.0"
 
 static HANDLE g_out;
 static int g_color;
